@@ -6,6 +6,8 @@
   vars:
     service_to_restart: "{{ service_to_restart | default('') }}"
     service_name: "{{ service_to_restart }}"
+    max_restart_attempts: "{{ max_attempts | default(3) }}"
+    restart_delay: "{{ delay | default(5) }}"
 
   tasks:
     - name: Validate service name
@@ -29,12 +31,77 @@
       ansible.builtin.service_facts:
       when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
 
-    - name: Restart service on Linux
+    - name: Check if service exists (Linux)
+      debug:
+        msg: "Service status before restart: {{ ansible_facts.services[service_name + '.service'].state }}"
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
+        - service_name + '.service' in ansible_facts.services
+      register: service_check
+
+    - name: Collect service status before restart
+      shell: "systemctl status {{ service_name }} || true"
+      register: service_status_before
+      when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
+
+    - name: Display service status before restart
+      debug:
+        msg: "{{ service_status_before.stdout_lines }}"
+      when: service_status_before is defined
+
+    - name: Attempt service restart (Linux)
+      block:
+        - name: Stop service first
+          ansible.builtin.systemd:
+            name: "{{ service_name }}"
+            state: stopped
+          when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
+          register: service_stop
+
+        - name: Wait for service to stop
+          pause:
+            seconds: "{{ restart_delay }}"
+
+        - name: Start service
+          ansible.builtin.systemd:
+            name: "{{ service_name }}"
+            state: started
+          register: service_start
+          retries: "{{ max_restart_attempts }}"
+          delay: "{{ restart_delay }}"
+          until: service_start is not failed
+      rescue:
+        - name: Collect service logs on failure
+          shell: "journalctl -u {{ service_name }} -n 50 --no-pager"
+          register: service_logs
+
+        - name: Display service logs
+          debug:
+            msg: "{{ service_logs.stdout_lines }}"
+
+        - name: Display detailed service status
+          shell: "systemctl status {{ service_name }} -l --no-pager"
+          register: detailed_status
+
+        - name: Show detailed status
+          debug:
+            msg: "{{ detailed_status.stdout_lines }}"
+
+        - name: Fail with detailed message
+          fail:
+            msg: "Service restart failed. Please check the logs above for details."
+
+    - name: Verify service is running (Linux)
       ansible.builtin.systemd:
         name: "{{ service_name }}"
-        state: restarted
+        state: started
+      register: final_status
       when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
-      register: linux_restart
+
+    - name: Display final service status
+      debug:
+        msg: "Final service status: {{ final_status }}"
+      when: final_status is defined
 
     - name: Restart service on Windows
       win_service:
@@ -42,12 +109,6 @@
         state: restarted
       when: ansible_facts['os_family'] == "Windows"
       register: windows_restart
-
-    - name: Verify service status after restart (Linux)
-      ansible.builtin.service:
-        name: "{{ service_name }}"
-        state: started
-      when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
 
     - name: Verify service status after restart (Windows)
       win_service:
