@@ -6,6 +6,9 @@
   vars:
     max_restart_attempts: "{{ max_attempts | default(3) }}"
     restart_delay: "{{ delay | default(5) }}"
+    # Use vault variables for authentication if needed
+    # ansible_ssh_pass: "{{ ansible_ssh_pass | default(omit) }}"
+    # ansible_become_pass: "{{ ansible_become_pass | default(omit) }}"
 
   tasks:
     - name: Validate input parameters
@@ -47,66 +50,44 @@
         msg: "{{ service_status_before.stdout_lines }}"
       when: service_status_before is defined
 
-    # Apache/httpd specific checks
-    - name: Check Apache configuration syntax (httpd)
-      shell: "httpd -t"
-      register: apache_config_test
-      ignore_errors: yes
-      when: 
-        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
-        - service_to_restart == 'httpd'
-
-    - name: Display Apache configuration test results
-      debug:
-        msg: 
-          - "Apache config test return code: {{ apache_config_test.rc }}"
-          - "Apache config test output: {{ apache_config_test.stdout_lines | default([]) }}"
-          - "Apache config test errors: {{ apache_config_test.stderr_lines | default([]) }}"
-      when: apache_config_test is defined
-
-    - name: Check Apache main config file exists
-      stat:
-        path: "/etc/httpd/conf/httpd.conf"
-      register: httpd_conf_check
-      when: 
-        - ansible_facts['os_family'] in ['RedHat', 'CentOS']
-        - service_to_restart == 'httpd'
-
-    - name: Check for Apache DocumentRoot and basic directories
-      shell: |
-        echo "Checking Apache directories:"
-        ls -la /etc/httpd/conf/ 2>/dev/null || echo "Apache config directory not found"
-        ls -la /var/www/ 2>/dev/null || echo "Apache document root not found"
-        ps aux | grep httpd | grep -v grep || echo "No httpd processes running"
-      register: apache_directory_check
-      when: 
-        - ansible_facts['os_family'] in ['RedHat', 'CentOS']
-        - service_to_restart == 'httpd'
-
-    - name: Display Apache directory check
-      debug:
-        msg: "{{ apache_directory_check.stdout_lines }}"
-      when: apache_directory_check is defined
-
     - name: Pre-flight service health check
       block:
-        - name: Check if any process is using the service ports
+        - name: Check if any process is using common service ports
           shell: |
+            echo "=== Port Usage Check for {{ service_to_restart }} ==="
             case "{{ service_to_restart }}" in
               httpd|apache2)
-                echo "Checking ports 80 and 443:"
+                echo "Checking web server ports 80 and 443:"
                 netstat -tulpn | grep -E ':(80|443)\s' || echo "Ports 80/443 are free"
                 ;;
               nginx)
-                echo "Checking ports 80 and 443:"
+                echo "Checking web server ports 80 and 443:"
                 netstat -tulpn | grep -E ':(80|443)\s' || echo "Ports 80/443 are free"
                 ;;
               ssh|sshd)
-                echo "Checking port 22:"
+                echo "Checking SSH port 22:"
                 netstat -tulpn | grep :22 || echo "Port 22 is free"
                 ;;
+              mysql|mysqld|mariadb)
+                echo "Checking MySQL/MariaDB port 3306:"
+                netstat -tulpn | grep :3306 || echo "Port 3306 is free"
+                ;;
+              postgresql|postgres)
+                echo "Checking PostgreSQL port 5432:"
+                netstat -tulpn | grep :5432 || echo "Port 5432 is free"
+                ;;
+              redis)
+                echo "Checking Redis port 6379:"
+                netstat -tulpn | grep :6379 || echo "Port 6379 is free"
+                ;;
+              docker)
+                echo "Checking Docker port 2376:"
+                netstat -tulpn | grep :2376 || echo "Port 2376 is free"
+                ;;
               *)
-                echo "Generic port check not implemented for {{ service_to_restart }}"
+                echo "No specific port check configured for {{ service_to_restart }}"
+                echo "Checking for any processes with this service name:"
+                ps aux | grep "{{ service_to_restart }}" | grep -v grep || echo "No {{ service_to_restart }} processes found"
                 ;;
             esac
           register: port_check
@@ -129,6 +110,19 @@
         - name: Display resource check
           debug:
             msg: "{{ resource_check.stdout_lines }}"
+
+        - name: Check service dependencies
+          shell: |
+            echo "=== Service Dependencies Check ==="
+            echo "Checking service dependencies for {{ service_to_restart }}:"
+            systemctl list-dependencies {{ service_to_restart }} --plain | head -10 || echo "Could not list dependencies"
+            echo "Checking if service is enabled:"
+            systemctl is-enabled {{ service_to_restart }} || echo "Service enablement status unknown"
+          register: dependency_check
+
+        - name: Display dependency check
+          debug:
+            msg: "{{ dependency_check.stdout_lines }}"
       when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
 
     - name: Attempt service restart (Linux)
@@ -158,36 +152,26 @@
           debug:
             msg: "{{ detailed_status.stdout_lines }}"
 
-        # Apache/httpd specific recovery attempts
-        - name: Apache recovery block
+        - name: Generic service recovery attempts
           block:
-            - name: Re-test Apache configuration after failure
-              shell: "httpd -t"
-              register: apache_config_retest
-              ignore_errors: yes
-
-            - name: Display Apache config retest results
-              debug:
-                msg: 
-                  - "Apache config retest: {{ apache_config_retest.stdout_lines | default([]) }}"
-                  - "Apache config errors: {{ apache_config_retest.stderr_lines | default([]) }}"
-
-            - name: Check for common Apache issues
+            - name: Check for common service issues
               shell: |
-                echo "=== Checking common Apache issues ==="
-                echo "1. Checking if port 80 is already in use:"
-                netstat -tulpn | grep :80 || echo "Port 80 is free"
-                echo "2. Checking SELinux context (if applicable):"
+                echo "=== Generic Service Diagnostics for {{ service_to_restart }} ==="
+                echo "1. Checking service configuration files:"
+                find /etc -name "*{{ service_to_restart }}*" -type f 2>/dev/null | head -5 || echo "No config files found"
+                echo "2. Checking service binary/executable:"
+                which {{ service_to_restart }} 2>/dev/null || echo "Service binary not found in PATH"
+                echo "3. Checking service user/group (if applicable):"
+                id {{ service_to_restart }} 2>/dev/null || echo "No dedicated service user"
+                echo "4. Checking SELinux context (if applicable):"
                 getenforce 2>/dev/null || echo "SELinux not available"
-                echo "3. Checking Apache process ownership:"
-                ls -la /var/run/httpd/ 2>/dev/null || echo "No httpd run directory"
-                echo "4. Checking disk space:"
-                df -h /var/log /tmp
-              register: apache_diagnostics
+                echo "5. Checking recent system messages:"
+                tail -10 /var/log/messages 2>/dev/null || echo "System messages not accessible"
+              register: generic_diagnostics
 
-            - name: Display Apache diagnostics
+            - name: Display generic diagnostics
               debug:
-                msg: "{{ apache_diagnostics.stdout_lines }}"
+                msg: "{{ generic_diagnostics.stdout_lines }}"
 
             - name: Attempt to start service instead of restart
               ansible.builtin.service:
@@ -198,9 +182,18 @@
 
             - name: Display start attempt result
               debug:
-                msg: "Service start attempt result: {{ 'SUCCESS' if service_start_attempt is not failed else 'FAILED' }}"
+                msg: 
+                  - "Service start attempt result: {{ 'SUCCESS' if service_start_attempt is not failed else 'FAILED' }}"
+                  - "{{ service_start_attempt.msg | default('No additional message') }}"
 
-          when: service_to_restart == 'httpd'
+            - name: Check service status after start attempt
+              shell: "systemctl is-active {{ service_to_restart }}"
+              register: post_start_status
+              ignore_errors: yes
+
+            - name: Display post-start status
+              debug:
+                msg: "Service status after start attempt: {{ post_start_status.stdout | default('unknown') }}"
 
         - name: Final failure message
           fail:
@@ -209,10 +202,17 @@
               Please check the logs and diagnostics above for details.
               Common issues to investigate:
               1. Configuration file syntax errors
-              2. Port conflicts (especially port 80/443 for web services)
+              2. Port conflicts with other services
               3. Insufficient permissions or SELinux issues
               4. Missing dependencies or files
-              5. Disk space issues
+              5. Disk space or memory issues
+              6. Service-specific requirements not met
+              
+              Next steps:
+              - Review the service logs: journalctl -u {{ service_to_restart }}
+              - Check service status: systemctl status {{ service_to_restart }}
+              - Verify configuration files
+              - Check system resources and dependencies
 
     - name: Verify service is running
       ansible.builtin.service:
