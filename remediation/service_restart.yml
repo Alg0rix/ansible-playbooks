@@ -4,9 +4,15 @@
   become: yes
   gather_facts: yes
   vars:
+    service_to_restart: "{{ service_to_restart | default('') }}"
     service_name: "{{ service_to_restart }}"
 
   tasks:
+    - name: Validate service name
+      fail:
+        msg: "No service name provided. Please specify service_to_restart variable."
+      when: service_to_restart | length == 0
+
     - name: Debug OS information
       debug:
         msg: 
