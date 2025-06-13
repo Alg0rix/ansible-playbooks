@@ -4,16 +4,14 @@
   become: yes
   gather_facts: yes
   vars:
-    service_to_restart: "{{ service_to_restart | default('') }}"
-    service_name: "{{ service_to_restart }}"
     max_restart_attempts: "{{ max_attempts | default(3) }}"
     restart_delay: "{{ delay | default(5) }}"
 
   tasks:
-    - name: Validate service name
+    - name: Validate input parameters
       fail:
-        msg: "No service name provided. Please specify service_to_restart variable."
-      when: service_to_restart | length == 0
+        msg: "No service name provided. Please specify service_to_restart parameter."
+      when: service_to_restart is not defined or service_to_restart == ''
 
     - name: Debug OS information
       debug:
@@ -24,7 +22,7 @@
 
     - name: Debug service name
       debug:
-        msg: "Service to be restarted: {{ service_name }}"
+        msg: "Service to be restarted: {{ service_to_restart }}"
         verbosity: 0
 
     - name: Get service status (Linux)
@@ -33,14 +31,14 @@
 
     - name: Check if service exists (Linux)
       debug:
-        msg: "Service status before restart: {{ ansible_facts.services[service_name + '.service'].state }}"
+        msg: "Service status before restart: {{ ansible_facts.services[service_to_restart + '.service'].state }}"
       when: 
         - ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
-        - service_name + '.service' in ansible_facts.services
+        - service_to_restart + '.service' in ansible_facts.services
       register: service_check
 
     - name: Collect service status before restart
-      shell: "systemctl status {{ service_name }} || true"
+      shell: "systemctl status {{ service_to_restart }} || true"
       register: service_status_before
       when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
 
