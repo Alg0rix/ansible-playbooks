@@ -49,25 +49,14 @@
 
     - name: Attempt service restart (Linux)
       block:
-        - name: Stop service first
-          ansible.builtin.systemd:
+        - name: Restart service {{ service_to_restart }}
+          ansible.builtin.service:
             name: "{{ service_to_restart }}"
-            state: stopped
-          when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
-          register: service_stop
-
-        - name: Wait for service to stop
-          pause:
-            seconds: "{{ restart_delay }}"
-
-        - name: Start service
-          ansible.builtin.systemd:
-            name: "{{ service_to_restart }}"
-            state: started
-          register: service_start
+            state: restarted
+          register: service_restart
           retries: "{{ max_restart_attempts }}"
           delay: "{{ restart_delay }}"
-          until: service_start is not failed
+          until: service_restart is not failed
       rescue:
         - name: Collect service logs on failure
           shell: "journalctl -u {{ service_to_restart }} -n 50 --no-pager"
@@ -89,12 +78,11 @@
           fail:
             msg: "Service restart failed. Please check the logs above for details."
 
-    - name: Verify service is running (Linux)
-      ansible.builtin.systemd:
+    - name: Verify service is running
+      ansible.builtin.service:
         name: "{{ service_to_restart }}"
         state: started
       register: final_status
-      when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
 
     - name: Display final service status
       debug:
