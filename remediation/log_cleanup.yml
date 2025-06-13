@@ -1,0 +1,44 @@
+---
+- name: Log Cleanup Remediation
+  hosts: "{{ target_hosts | default('all') }}"
+  become: yes
+  vars:
+    log_paths: "{{ log_directories | default(['/var/log']) }}"
+    days_old: "{{ days_to_keep | default(30) }}"
+    size_limit_mb: "{{ max_size_mb | default(1024) }}"
+
+  tasks:
+    - name: Find old log files (Linux)
+      find:
+        paths: "{{ log_paths }}"
+        patterns: "*.log,*.gz"
+        age: "{{ days_old }}d"
+        recurse: yes
+      register: old_logs
+      when: ansible_facts['os_family'] == "Linux"
+
+    - name: Remove old log files (Linux)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      with_items: "{{ old_logs.files }}"
+      when: ansible_facts['os_family'] == "Linux"
+
+    - name: Cleanup Windows logs
+      win_shell: |
+        $MaxSize = {{ size_limit_mb }} * 1MB
+        Get-WmiObject Win32_NTEventLogFile | ForEach-Object {
+          if ($_.FileSize -gt $MaxSize) {
+            Clear-EventLog -LogName $_.LogFileName
+          }
+        }
+        Get-ChildItem -Path "C:\Windows\Logs" -Recurse -File |
+          Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-{{ days_old }}) } |
+          Remove-Item -Force
+      when: ansible_facts['os_family'] == "Windows"
+
+    - name: Compress logs (Linux)
+      shell: |
+        find {{ item }} -type f -name "*.log" -mtime +7 -exec gzip {} \;
+      with_items: "{{ log_paths }}"
+      when: ansible_facts['os_family'] == "Linux"

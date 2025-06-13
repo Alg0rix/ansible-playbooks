@@ -1,0 +1,61 @@
+---
+- name: Resource Management Remediation
+  hosts: "{{ target_hosts | default('all') }}"
+  become: yes
+  vars:
+    cpu_threshold: "{{ cpu_limit | default(80) }}"
+    memory_threshold: "{{ memory_limit | default(80) }}"
+    excluded_processes: "{{ process_exclusions | default(['systemd', 'sshd']) }}"
+    action: "{{ process_action | default('kill') }}"  # Options: kill, restart, nice
+
+  tasks:
+    - name: Get high CPU processes (Linux)
+      shell: |
+        ps aux --no-headers | awk '{ if ($3 > {{ cpu_threshold }}) print $2,$3,$11 }'
+      register: high_cpu_linux
+      when: ansible_facts['os_family'] == "Linux"
+
+    - name: Get high memory processes (Linux)
+      shell: |
+        ps aux --no-headers | awk '{ if ($4 > {{ memory_threshold }}) print $2,$4,$11 }'
+      register: high_memory_linux
+      when: ansible_facts['os_family'] == "Linux"
+
+    - name: Handle resource-intensive processes (Linux)
+      block:
+        - name: Kill high CPU/memory processes
+          shell: "kill -15 {{ item.split()[0] }}"
+          when: 
+            - action == 'kill'
+            - item.split()[2] not in excluded_processes
+          with_items: 
+            - "{{ high_cpu_linux.stdout_lines + high_memory_linux.stdout_lines }}"
+          
+        - name: Renice high CPU/memory processes
+          shell: "renice 19 {{ item.split()[0] }}"
+          when: 
+            - action == 'nice'
+            - item.split()[2] not in excluded_processes
+          with_items: 
+            - "{{ high_cpu_linux.stdout_lines + high_memory_linux.stdout_lines }}"
+      when: ansible_facts['os_family'] == "Linux"
+
+    - name: Get and handle resource-intensive processes (Windows)
+      block:
+        - name: Get high CPU/memory processes
+          win_shell: |
+            Get-Process | 
+            Where-Object {
+              ($_.CPU -gt {{ cpu_threshold }} -or 
+               $_.WS/1MB -gt {{ memory_threshold }}) -and
+              $_.ProcessName -notin @('{{ excluded_processes | join("','") }}')
+            } |
+            Select-Object Id,ProcessName,CPU,WS
+          register: high_resource_win
+
+        - name: Stop resource-intensive processes
+          win_shell: |
+            Stop-Process -Id {{ item.split()[0] }} -Force
+          with_items: "{{ high_resource_win.stdout_lines }}"
+          when: action == 'kill'
+      when: ansible_facts['os_family'] == "Windows"
