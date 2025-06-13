@@ -47,6 +47,90 @@
         msg: "{{ service_status_before.stdout_lines }}"
       when: service_status_before is defined
 
+    # Apache/httpd specific checks
+    - name: Check Apache configuration syntax (httpd)
+      shell: "httpd -t"
+      register: apache_config_test
+      ignore_errors: yes
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
+        - service_to_restart == 'httpd'
+
+    - name: Display Apache configuration test results
+      debug:
+        msg: 
+          - "Apache config test return code: {{ apache_config_test.rc }}"
+          - "Apache config test output: {{ apache_config_test.stdout_lines | default([]) }}"
+          - "Apache config test errors: {{ apache_config_test.stderr_lines | default([]) }}"
+      when: apache_config_test is defined
+
+    - name: Check Apache main config file exists
+      stat:
+        path: "/etc/httpd/conf/httpd.conf"
+      register: httpd_conf_check
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'CentOS']
+        - service_to_restart == 'httpd'
+
+    - name: Check for Apache DocumentRoot and basic directories
+      shell: |
+        echo "Checking Apache directories:"
+        ls -la /etc/httpd/conf/ 2>/dev/null || echo "Apache config directory not found"
+        ls -la /var/www/ 2>/dev/null || echo "Apache document root not found"
+        ps aux | grep httpd | grep -v grep || echo "No httpd processes running"
+      register: apache_directory_check
+      when: 
+        - ansible_facts['os_family'] in ['RedHat', 'CentOS']
+        - service_to_restart == 'httpd'
+
+    - name: Display Apache directory check
+      debug:
+        msg: "{{ apache_directory_check.stdout_lines }}"
+      when: apache_directory_check is defined
+
+    - name: Pre-flight service health check
+      block:
+        - name: Check if any process is using the service ports
+          shell: |
+            case "{{ service_to_restart }}" in
+              httpd|apache2)
+                echo "Checking ports 80 and 443:"
+                netstat -tulpn | grep -E ':(80|443)\s' || echo "Ports 80/443 are free"
+                ;;
+              nginx)
+                echo "Checking ports 80 and 443:"
+                netstat -tulpn | grep -E ':(80|443)\s' || echo "Ports 80/443 are free"
+                ;;
+              ssh|sshd)
+                echo "Checking port 22:"
+                netstat -tulpn | grep :22 || echo "Port 22 is free"
+                ;;
+              *)
+                echo "Generic port check not implemented for {{ service_to_restart }}"
+                ;;
+            esac
+          register: port_check
+
+        - name: Display port check results
+          debug:
+            msg: "{{ port_check.stdout_lines }}"
+
+        - name: Check system resources
+          shell: |
+            echo "=== System Resource Check ==="
+            echo "Memory usage:"
+            free -h
+            echo "Disk space:"
+            df -h
+            echo "Load average:"
+            uptime
+          register: resource_check
+
+        - name: Display resource check
+          debug:
+            msg: "{{ resource_check.stdout_lines }}"
+      when: ansible_facts['os_family'] in ['RedHat', 'Debian', 'SUSE']
+
     - name: Attempt service restart (Linux)
       block:
         - name: Restart service {{ service_to_restart }}
@@ -74,9 +158,61 @@
           debug:
             msg: "{{ detailed_status.stdout_lines }}"
 
-        - name: Fail with detailed message
+        # Apache/httpd specific recovery attempts
+        - name: Apache recovery block
+          block:
+            - name: Re-test Apache configuration after failure
+              shell: "httpd -t"
+              register: apache_config_retest
+              ignore_errors: yes
+
+            - name: Display Apache config retest results
+              debug:
+                msg: 
+                  - "Apache config retest: {{ apache_config_retest.stdout_lines | default([]) }}"
+                  - "Apache config errors: {{ apache_config_retest.stderr_lines | default([]) }}"
+
+            - name: Check for common Apache issues
+              shell: |
+                echo "=== Checking common Apache issues ==="
+                echo "1. Checking if port 80 is already in use:"
+                netstat -tulpn | grep :80 || echo "Port 80 is free"
+                echo "2. Checking SELinux context (if applicable):"
+                getenforce 2>/dev/null || echo "SELinux not available"
+                echo "3. Checking Apache process ownership:"
+                ls -la /var/run/httpd/ 2>/dev/null || echo "No httpd run directory"
+                echo "4. Checking disk space:"
+                df -h /var/log /tmp
+              register: apache_diagnostics
+
+            - name: Display Apache diagnostics
+              debug:
+                msg: "{{ apache_diagnostics.stdout_lines }}"
+
+            - name: Attempt to start service instead of restart
+              ansible.builtin.service:
+                name: "{{ service_to_restart }}"
+                state: started
+              register: service_start_attempt
+              ignore_errors: yes
+
+            - name: Display start attempt result
+              debug:
+                msg: "Service start attempt result: {{ 'SUCCESS' if service_start_attempt is not failed else 'FAILED' }}"
+
+          when: service_to_restart == 'httpd'
+
+        - name: Final failure message
           fail:
-            msg: "Service restart failed. Please check the logs above for details."
+            msg: |
+              Service restart failed for {{ service_to_restart }}.
+              Please check the logs and diagnostics above for details.
+              Common issues to investigate:
+              1. Configuration file syntax errors
+              2. Port conflicts (especially port 80/443 for web services)
+              3. Insufficient permissions or SELinux issues
+              4. Missing dependencies or files
+              5. Disk space issues
 
     - name: Verify service is running
       ansible.builtin.service:

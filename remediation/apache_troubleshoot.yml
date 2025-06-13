@@ -1,0 +1,147 @@
+---
+- name: Apache/httpd Specific Troubleshooting and Remediation
+  hosts: "{{ target_hosts | default('all') }}"
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Check Apache installation
+      shell: |
+        echo "=== Apache Installation Check ==="
+        rpm -qa | grep httpd || echo "Apache not installed via RPM"
+        which httpd || echo "httpd binary not found in PATH"
+        echo "Apache version:"
+        httpd -v 2>/dev/null || echo "Cannot determine Apache version"
+      register: apache_install_check
+
+    - name: Display Apache installation status
+      debug:
+        msg: "{{ apache_install_check.stdout_lines }}"
+
+    - name: Check Apache configuration files
+      shell: |
+        echo "=== Apache Configuration Check ==="
+        echo "Main config file:"
+        ls -la /etc/httpd/conf/httpd.conf 2>/dev/null || echo "Main config not found"
+        echo "Config directory contents:"
+        ls -la /etc/httpd/conf.d/ 2>/dev/null || echo "Config.d directory not found"
+        echo "Module directory:"
+        ls -la /etc/httpd/modules/ 2>/dev/null || echo "Modules directory not found"
+      register: apache_config_check
+
+    - name: Display Apache configuration status
+      debug:
+        msg: "{{ apache_config_check.stdout_lines }}"
+
+    - name: Test Apache configuration syntax
+      shell: "httpd -t"
+      register: apache_syntax_test
+      ignore_errors: yes
+
+    - name: Display Apache syntax test results
+      debug:
+        msg: 
+          - "Apache syntax test return code: {{ apache_syntax_test.rc }}"
+          - "STDOUT: {{ apache_syntax_test.stdout_lines | default(['No output']) }}"
+          - "STDERR: {{ apache_syntax_test.stderr_lines | default(['No errors']) }}"
+
+    - name: Check Apache error logs
+      shell: |
+        echo "=== Recent Apache Error Log Entries ==="
+        tail -20 /var/log/httpd/error_log 2>/dev/null || echo "Error log not found or empty"
+        echo "=== Recent Apache Access Log Entries ==="
+        tail -10 /var/log/httpd/access_log 2>/dev/null || echo "Access log not found or empty"
+      register: apache_logs
+
+    - name: Display Apache logs
+      debug:
+        msg: "{{ apache_logs.stdout_lines }}"
+
+    - name: Check for common Apache issues
+      shell: |
+        echo "=== Common Apache Issues Check ==="
+        echo "1. Port conflicts:"
+        netstat -tulpn | grep -E ':(80|443)\s' || echo "Ports 80/443 are available"
+        echo "2. Document root permissions:"
+        ls -ld /var/www/html 2>/dev/null || echo "Document root not found"
+        echo "3. SELinux status:"
+        getenforce 2>/dev/null || echo "SELinux not available"
+        echo "4. Apache user/group:"
+        id apache 2>/dev/null || echo "Apache user not found"
+        echo "5. Process check:"
+        ps aux | grep httpd | grep -v grep || echo "No httpd processes running"
+      register: apache_common_issues
+
+    - name: Display common issues check
+      debug:
+        msg: "{{ apache_common_issues.stdout_lines }}"
+
+    - name: Attempt Apache fixes
+      block:
+        - name: Create basic document root if missing
+          file:
+            path: /var/www/html
+            state: directory
+            owner: apache
+            group: apache
+            mode: '0755'
+          ignore_errors: yes
+
+        - name: Create a basic index.html if missing
+          copy:
+            content: |
+              <!DOCTYPE html>
+              <html>
+              <head>
+                  <title>Apache Test Page</title>
+              </head>
+              <body>
+                  <h1>Apache is working!</h1>
+                  <p>This is a test page created by the remediation playbook.</p>
+              </body>
+              </html>
+            dest: /var/www/html/index.html
+            owner: apache
+            group: apache
+            mode: '0644'
+          when: not ansible_check_mode
+          ignore_errors: yes
+
+        - name: Fix common Apache configuration issues
+          lineinfile:
+            path: /etc/httpd/conf/httpd.conf
+            line: "ServerName {{ ansible_fqdn | default(ansible_default_ipv4.address) }}:80"
+            regexp: '^#?ServerName'
+            backup: yes
+          ignore_errors: yes
+          notify: restart apache
+
+        - name: Ensure Apache log directory exists
+          file:
+            path: /var/log/httpd
+            state: directory
+            owner: apache
+            group: apache
+            mode: '0755'
+          ignore_errors: yes
+
+      rescue:
+        - name: Display fix attempt failures
+          debug:
+            msg: "Some automatic fixes failed. Manual intervention may be required."
+
+    - name: Final Apache status check
+      shell: "systemctl status httpd --no-pager -l"
+      register: final_apache_status
+      ignore_errors: yes
+
+    - name: Display final Apache status
+      debug:
+        msg: "{{ final_apache_status.stdout_lines }}"
+
+  handlers:
+    - name: restart apache
+      service:
+        name: httpd
+        state: restarted
+      ignore_errors: yes
