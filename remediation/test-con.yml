@@ -1,24 +1,37 @@
 ---
-- name: Test credentials with JSON output
-  hosts: all
+- name: Test credentials and detect OS
+  hosts: "{{target_hosts}}"
   gather_facts: no
   
   tasks:
-    # Test Linux connection
-    - name: Test Linux connection
-      raw: "echo 'LINUX_SUCCESS'"
-      register: linux_test
+    # Test SSH connection and detect OS
+    - name: Test SSH connection and detect OS
+      raw: |
+        if command -v uname >/dev/null 2>&1; then
+          echo "OS_TYPE:LINUX"
+          echo "STATUS:SUCCESS"
+          uname -a
+        elif command -v systeminfo >/dev/null 2>&1; then
+          echo "OS_TYPE:WINDOWS" 
+          echo "STATUS:SUCCESS"
+          systeminfo | findstr /C:"OS Name" | head -1
+        elif [ -f /proc/version ]; then
+          echo "OS_TYPE:LINUX"
+          echo "STATUS:SUCCESS"
+          cat /proc/version
+        elif exist C:\Windows\System32\cmd.exe 2>nul; then
+          echo "OS_TYPE:WINDOWS"
+          echo "STATUS:SUCCESS"
+          ver
+        else
+          echo "OS_TYPE:UNKNOWN"
+          echo "STATUS:SUCCESS"
+          echo "Connected but cannot determine OS"
+        fi
+      register: ssh_test
       ignore_errors: yes
-      when: ansible_connection is not defined or ansible_connection != 'winrm'
 
-    # Test Windows connection  
-    - name: Test Windows connection
-      win_shell: "echo 'WINDOWS_SUCCESS'"
-      register: windows_test
-      ignore_errors: yes
-      when: ansible_connection is defined and ansible_connection == 'winrm'
-
-    # JSON output with result
+    # JSON output with OS detection
     - name: Output test result
       debug:
         msg: "{{ result_json | to_json }}"
@@ -26,65 +39,44 @@
         result_json:
           hostname: "{{ inventory_hostname }}"
           ip: "{{ ansible_host | default(inventory_hostname) }}"
-          os_type: "{{ os_type }}"
-          status: "{{ status }}"
-          details: "{{ details }}"
+          os_type: "{{ detected_os }}"
+          status: "{{ connection_status }}"
+          details: "{{ connection_details }}"
         
-        os_type: |
-          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
-          linux
-          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
-          windows
+        # Extract OS type from command output
+        detected_os: |
+          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
+            {%- if 'OS_TYPE:LINUX' in ssh_test.stdout -%}
+            linux
+            {%- elif 'OS_TYPE:WINDOWS' in ssh_test.stdout -%}
+            windows
+            {%- else -%}
+            unknown
+            {%- endif -%}
           {%- else -%}
-          unknown
+          failed_to_connect
           {%- endif -%}
         
-        status: |
-          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
-            {%- if linux_test.rc == 0 -%}
-            success
-            {%- elif 'Permission denied' in linux_test.stderr or 'Authentication failed' in linux_test.stderr or 'Invalid user' in linux_test.stderr -%}
-            auth_failed
-            {%- elif 'Connection refused' in linux_test.stderr or 'No route to host' in linux_test.stderr -%}
-            connection_refused
-            {%- elif 'Connection timed out' in linux_test.stderr or 'Host is unreachable' in linux_test.stderr -%}
-            connection_timeout
-            {%- elif 'Name or service not known' in linux_test.stderr -%}
-            dns_failed
-            {%- else -%}
-            failed
-            {%- endif -%}
-          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
-            {%- if windows_test.rc == 0 -%}
-            success
-            {%- elif 'Access is denied' in windows_test.stderr or 'Login failure' in windows_test.stderr or 'Authentication failed' in windows_test.stderr -%}
-            auth_failed
-            {%- elif 'Connection refused' in windows_test.stderr or 'WinRM cannot complete' in windows_test.stderr -%}
-            connection_refused
-            {%- elif 'Connection timed out' in windows_test.stderr or 'Timeout' in windows_test.stderr -%}
-            connection_timeout
-            {%- elif 'Name or service not known' in windows_test.stderr or 'could not be resolved' in windows_test.stderr -%}
-            dns_failed
-            {%- else -%}
-            failed
-            {%- endif -%}
+        # Connection status
+        connection_status: |
+          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
+          success
+          {%- elif 'Permission denied' in ssh_test.stderr or 'Authentication failed' in ssh_test.stderr or 'Invalid user' in ssh_test.stderr -%}
+          auth_failed
+          {%- elif 'Connection refused' in ssh_test.stderr or 'No route to host' in ssh_test.stderr -%}
+          connection_refused
+          {%- elif 'Connection timed out' in ssh_test.stderr or 'Host is unreachable' in ssh_test.stderr -%}
+          connection_timeout
+          {%- elif 'Name or service not known' in ssh_test.stderr -%}
+          dns_failed
           {%- else -%}
-          skipped
+          failed
           {%- endif -%}
         
-        details: |
-          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
-            {%- if linux_test.rc == 0 -%}
-            Linux connection successful
-            {%- else -%}
-            {{ linux_test.stderr | default('Linux connection failed') }}
-            {%- endif -%}
-          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
-            {%- if windows_test.rc == 0 -%}
-            Windows connection successful
-            {%- else -%}
-            {{ windows_test.stderr | default('Windows connection failed') }}
-            {%- endif -%}
+        # Connection details
+        connection_details: |
+          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
+          {{ ssh_test.stdout | regex_replace('\n', ' ') | trim }}
           {%- else -%}
-          No connection test performed
+          {{ ssh_test.stderr | default('SSH connection failed') | regex_replace('\n', ' ') | trim }}
           {%- endif -%}
