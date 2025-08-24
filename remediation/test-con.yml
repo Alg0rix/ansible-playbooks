@@ -4,32 +4,18 @@
   gather_facts: no
   
   tasks:
-    # Test SSH connection and detect OS
-    - name: Test SSH connection and detect OS
-      raw: |
-        if command -v uname >/dev/null 2>&1; then
-          echo "OS_TYPE:LINUX"
-          echo "STATUS:SUCCESS"
-          uname -a
-        elif command -v systeminfo >/dev/null 2>&1; then
-          echo "OS_TYPE:WINDOWS" 
-          echo "STATUS:SUCCESS"
-          systeminfo | findstr /C:"OS Name" | head -1
-        elif [ -f /proc/version ]; then
-          echo "OS_TYPE:LINUX"
-          echo "STATUS:SUCCESS"
-          cat /proc/version
-        elif exist C:\Windows\System32\cmd.exe 2>nul; then
-          echo "OS_TYPE:WINDOWS"
-          echo "STATUS:SUCCESS"
-          ver
-        else
-          echo "OS_TYPE:UNKNOWN"
-          echo "STATUS:SUCCESS"
-          echo "Connected but cannot determine OS"
-        fi
-      register: ssh_test
+    # Test for Windows first (simpler check)
+    - name: Test for Windows
+      raw: "echo OS_TYPE:WINDOWS && ver"
+      register: windows_test
       ignore_errors: yes
+
+    # Test for Linux if Windows failed
+    - name: Test for Linux  
+      raw: "echo OS_TYPE:LINUX && uname -s"
+      register: linux_test
+      ignore_errors: yes
+      when: windows_test.rc != 0
 
     # JSON output with OS detection
     - name: Output test result
@@ -43,40 +29,41 @@
           status: "{{ connection_status }}"
           details: "{{ connection_details }}"
         
-        # Extract OS type from command output
+        # Determine OS based on successful test
         detected_os: |
-          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
-            {%- if 'OS_TYPE:LINUX' in ssh_test.stdout -%}
-            linux
-            {%- elif 'OS_TYPE:WINDOWS' in ssh_test.stdout -%}
-            windows
-            {%- else -%}
-            unknown
-            {%- endif -%}
+          {%- if windows_test.rc == 0 -%}
+          windows
+          {%- elif linux_test is defined and linux_test.rc == 0 -%}
+          linux
           {%- else -%}
-          failed_to_connect
+          unknown
           {%- endif -%}
         
         # Connection status
         connection_status: |
-          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
+          {%- if windows_test.rc == 0 or (linux_test is defined and linux_test.rc == 0) -%}
           success
-          {%- elif 'Permission denied' in ssh_test.stderr or 'Authentication failed' in ssh_test.stderr or 'Invalid user' in ssh_test.stderr -%}
-          auth_failed
-          {%- elif 'Connection refused' in ssh_test.stderr or 'No route to host' in ssh_test.stderr -%}
-          connection_refused
-          {%- elif 'Connection timed out' in ssh_test.stderr or 'Host is unreachable' in ssh_test.stderr -%}
-          connection_timeout
-          {%- elif 'Name or service not known' in ssh_test.stderr -%}
-          dns_failed
           {%- else -%}
-          failed
+            {%- set failed_test = windows_test if windows_test.rc != 0 else linux_test -%}
+            {%- if 'Permission denied' in failed_test.stderr or 'Authentication failed' in failed_test.stderr or 'Invalid user' in failed_test.stderr -%}
+            auth_failed
+            {%- elif 'Connection refused' in failed_test.stderr or 'No route to host' in failed_test.stderr -%}
+            connection_refused
+            {%- elif 'Connection timed out' in failed_test.stderr or 'Host is unreachable' in failed_test.stderr -%}
+            connection_timeout
+            {%- elif 'Name or service not known' in failed_test.stderr -%}
+            dns_failed
+            {%- else -%}
+            failed
+            {%- endif -%}
           {%- endif -%}
         
         # Connection details
         connection_details: |
-          {%- if ssh_test.rc is defined and ssh_test.rc == 0 -%}
-          {{ ssh_test.stdout | regex_replace('\n', ' ') | trim }}
+          {%- if windows_test.rc == 0 -%}
+          {{ windows_test.stdout | regex_replace('[\r\n\x1b\[\d+[A-Za-z]]', ' ') | regex_replace('\s+', ' ') | trim }}
+          {%- elif linux_test is defined and linux_test.rc == 0 -%}
+          {{ linux_test.stdout | regex_replace('[\r\n]', ' ') | trim }}
           {%- else -%}
-          {{ ssh_test.stderr | default('SSH connection failed') | regex_replace('\n', ' ') | trim }}
+          {{ windows_test.stderr | default('Connection failed') | regex_replace('[\r\n]', ' ') | trim }}
           {%- endif -%}
