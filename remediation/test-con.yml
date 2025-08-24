@@ -1,5 +1,5 @@
 ---
-- name: Test credentials with detailed error reporting
+- name: Test credentials with JSON output
   hosts: all
   gather_facts: no
   
@@ -18,44 +18,73 @@
       ignore_errors: yes
       when: ansible_connection is defined and ansible_connection == 'winrm'
 
-    # Parse Linux errors
-    - name: Output Linux result
+    # JSON output with result
+    - name: Output test result
       debug:
-        msg: "{{ inventory_hostname }}:{{ ansible_host | default(inventory_hostname) }}:LINUX:{{ linux_status }}"
+        msg: "{{ result_json | to_json }}"
       vars:
-        linux_status: |
-          {%- if linux_test.rc == 0 -%}
-          SUCCESS
-          {%- elif 'Permission denied' in linux_test.stderr or 'Authentication failed' in linux_test.stderr or 'Invalid user' in linux_test.stderr -%}
-          AUTH_FAILED
-          {%- elif 'Connection refused' in linux_test.stderr or 'No route to host' in linux_test.stderr -%}
-          CONNECTION_REFUSED
-          {%- elif 'Connection timed out' in linux_test.stderr or 'Host is unreachable' in linux_test.stderr -%}
-          CONNECTION_TIMEOUT
-          {%- elif 'Name or service not known' in linux_test.stderr -%}
-          DNS_FAILED
+        result_json:
+          hostname: "{{ inventory_hostname }}"
+          ip: "{{ ansible_host | default(inventory_hostname) }}"
+          os_type: "{{ os_type }}"
+          status: "{{ status }}"
+          details: "{{ details }}"
+        
+        os_type: |
+          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
+          linux
+          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
+          windows
           {%- else -%}
-          FAILED
+          unknown
           {%- endif -%}
-      when: linux_test is defined
-
-    # Parse Windows errors
-    - name: Output Windows result
-      debug:
-        msg: "{{ inventory_hostname }}:{{ ansible_host | default(inventory_hostname) }}:WINDOWS:{{ windows_status }}"
-      vars:
-        windows_status: |
-          {%- if windows_test.rc == 0 -%}
-          SUCCESS
-          {%- elif 'Access is denied' in windows_test.stderr or 'Login failure' in windows_test.stderr or 'Authentication failed' in windows_test.stderr -%}
-          AUTH_FAILED
-          {%- elif 'Connection refused' in windows_test.stderr or 'WinRM cannot complete' in windows_test.stderr -%}
-          CONNECTION_REFUSED
-          {%- elif 'Connection timed out' in windows_test.stderr or 'Timeout' in windows_test.stderr -%}
-          CONNECTION_TIMEOUT
-          {%- elif 'Name or service not known' in windows_test.stderr or 'could not be resolved' in windows_test.stderr -%}
-          DNS_FAILED
+        
+        status: |
+          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
+            {%- if linux_test.rc == 0 -%}
+            success
+            {%- elif 'Permission denied' in linux_test.stderr or 'Authentication failed' in linux_test.stderr or 'Invalid user' in linux_test.stderr -%}
+            auth_failed
+            {%- elif 'Connection refused' in linux_test.stderr or 'No route to host' in linux_test.stderr -%}
+            connection_refused
+            {%- elif 'Connection timed out' in linux_test.stderr or 'Host is unreachable' in linux_test.stderr -%}
+            connection_timeout
+            {%- elif 'Name or service not known' in linux_test.stderr -%}
+            dns_failed
+            {%- else -%}
+            failed
+            {%- endif -%}
+          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
+            {%- if windows_test.rc == 0 -%}
+            success
+            {%- elif 'Access is denied' in windows_test.stderr or 'Login failure' in windows_test.stderr or 'Authentication failed' in windows_test.stderr -%}
+            auth_failed
+            {%- elif 'Connection refused' in windows_test.stderr or 'WinRM cannot complete' in windows_test.stderr -%}
+            connection_refused
+            {%- elif 'Connection timed out' in windows_test.stderr or 'Timeout' in windows_test.stderr -%}
+            connection_timeout
+            {%- elif 'Name or service not known' in windows_test.stderr or 'could not be resolved' in windows_test.stderr -%}
+            dns_failed
+            {%- else -%}
+            failed
+            {%- endif -%}
           {%- else -%}
-          FAILED
+          skipped
           {%- endif -%}
-      when: windows_test is defined and not windows_test.skipped | default(false)
+        
+        details: |
+          {%- if linux_test is defined and not linux_test.skipped | default(false) -%}
+            {%- if linux_test.rc == 0 -%}
+            Linux connection successful
+            {%- else -%}
+            {{ linux_test.stderr | default('Linux connection failed') }}
+            {%- endif -%}
+          {%- elif windows_test is defined and not windows_test.skipped | default(false) -%}
+            {%- if windows_test.rc == 0 -%}
+            Windows connection successful
+            {%- else -%}
+            {{ windows_test.stderr | default('Windows connection failed') }}
+            {%- endif -%}
+          {%- else -%}
+          No connection test performed
+          {%- endif -%}
