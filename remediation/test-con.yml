@@ -1,6 +1,6 @@
 ---
 - name: Test credentials with detailed error reporting
-  hosts: "{{ target_hosts | default('all') }}"
+  hosts: all
   gather_facts: no
   
   tasks:
@@ -58,4 +58,4 @@
           {%- else -%}
           FAILED
           {%- endif -%}
-      when: windows_test is defined
+      when: windows_test is defined and not windows_test.skipped | default(false)
