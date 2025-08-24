@@ -1,0 +1,61 @@
+---
+- name: Test credentials with detailed error reporting
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: no
+  
+  tasks:
+    # Test Linux connection
+    - name: Test Linux connection
+      raw: "echo 'LINUX_SUCCESS'"
+      register: linux_test
+      ignore_errors: yes
+      when: ansible_connection is not defined or ansible_connection != 'winrm'
+
+    # Test Windows connection  
+    - name: Test Windows connection
+      win_shell: "echo 'WINDOWS_SUCCESS'"
+      register: windows_test
+      ignore_errors: yes
+      when: ansible_connection is defined and ansible_connection == 'winrm'
+
+    # Parse Linux errors
+    - name: Output Linux result
+      debug:
+        msg: "{{ inventory_hostname }}:{{ ansible_host | default(inventory_hostname) }}:LINUX:{{ linux_status }}"
+      vars:
+        linux_status: |
+          {%- if linux_test.rc == 0 -%}
+          SUCCESS
+          {%- elif 'Permission denied' in linux_test.stderr or 'Authentication failed' in linux_test.stderr or 'Invalid user' in linux_test.stderr -%}
+          AUTH_FAILED
+          {%- elif 'Connection refused' in linux_test.stderr or 'No route to host' in linux_test.stderr -%}
+          CONNECTION_REFUSED
+          {%- elif 'Connection timed out' in linux_test.stderr or 'Host is unreachable' in linux_test.stderr -%}
+          CONNECTION_TIMEOUT
+          {%- elif 'Name or service not known' in linux_test.stderr -%}
+          DNS_FAILED
+          {%- else -%}
+          FAILED
+          {%- endif -%}
+      when: linux_test is defined
+
+    # Parse Windows errors
+    - name: Output Windows result
+      debug:
+        msg: "{{ inventory_hostname }}:{{ ansible_host | default(inventory_hostname) }}:WINDOWS:{{ windows_status }}"
+      vars:
+        windows_status: |
+          {%- if windows_test.rc == 0 -%}
+          SUCCESS
+          {%- elif 'Access is denied' in windows_test.stderr or 'Login failure' in windows_test.stderr or 'Authentication failed' in windows_test.stderr -%}
+          AUTH_FAILED
+          {%- elif 'Connection refused' in windows_test.stderr or 'WinRM cannot complete' in windows_test.stderr -%}
+          CONNECTION_REFUSED
+          {%- elif 'Connection timed out' in windows_test.stderr or 'Timeout' in windows_test.stderr -%}
+          CONNECTION_TIMEOUT
+          {%- elif 'Name or service not known' in windows_test.stderr or 'could not be resolved' in windows_test.stderr -%}
+          DNS_FAILED
+          {%- else -%}
+          FAILED
+          {%- endif -%}
+      when: windows_test is defined
