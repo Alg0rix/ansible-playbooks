@@ -184,46 +184,62 @@
         - name: Analyze network interface errors and statistics
           shell: |
             echo '{"interface_errors": {'
-            # Get interface statistics
-            ip -s link show | while IFS= read -r line; do
-              if [[ $line =~ ^[0-9]+:[[:space:]]+([^:]+): ]]; then
-                iface="${BASH_REMATCH[1]}"
-                echo "  \"$iface\": {"
-              elif [[ $line =~ [[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]]; then
-                echo "    \"rx_bytes\": \"${BASH_REMATCH[1]}\","
-                echo "    \"rx_packets\": \"${BASH_REMATCH[2]}\","
-                echo "    \"rx_errors\": \"${BASH_REMATCH[3]}\","
-                echo "    \"rx_dropped\": \"${BASH_REMATCH[4]}\","
-                echo "    \"rx_overruns\": \"${BASH_REMATCH[5]}\""
-              elif [[ $line =~ [[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]] && [[ -n "$iface" ]]; then
-                echo "    \"tx_bytes\": \"${BASH_REMATCH[1]}\","
-                echo "    \"tx_packets\": \"${BASH_REMATCH[2]}\","
-                echo "    \"tx_errors\": \"${BASH_REMATCH[3]}\","
-                echo "    \"tx_dropped\": \"${BASH_REMATCH[4]}\","
-                echo "    \"tx_overruns\": \"${BASH_REMATCH[5]}\""
-                echo "  },"
-                iface=""
-              fi
-            done | sed '$s/,$//'
+            ip -s link show 2>/dev/null | awk '
+            /^[0-9]+: / {
+              if (iface != "") print "  },"
+              iface = $2
+              gsub(/:/, "", iface)
+              print "  \"" iface "\": {"
+              # Skip interface line and MAC address line
+              getline
+              getline
+              # Read RX line
+              getline
+              rx_bytes = $1
+              rx_packets = $2
+              rx_errors = $3
+              rx_dropped = $4
+              rx_overrun = $5
+              print "    \"rx_bytes\": \"" rx_bytes "\","
+              print "    \"rx_packets\": \"" rx_packets "\","
+              print "    \"rx_errors\": \"" rx_errors "\","
+              print "    \"rx_dropped\": \"" rx_dropped "\","
+              print "    \"rx_overruns\": \"" rx_overrun "\","
+              # Read TX line
+              getline
+              getline
+              tx_bytes = $1
+              tx_packets = $2
+              tx_errors = $3
+              tx_dropped = $4
+              tx_overrun = $5
+              print "    \"tx_bytes\": \"" tx_bytes "\","
+              print "    \"tx_packets\": \"" tx_packets "\","
+              print "    \"tx_errors\": \"" tx_errors "\","
+              print "    \"tx_dropped\": \"" tx_dropped "\","
+              print "    \"tx_overruns\": \"" tx_overrun "\""
+            }
+            END {
+              if (iface != "") print "  }"
+            }
+            '
             echo '}}'
           register: interface_errors
 
         - name: Analyze network connection states
           shell: |
             echo '{"connection_states": {'
-            netstat -an | awk '/^tcp/ {print $6}' | sort | uniq -c | while read count state; do
-              echo "  \"$state\": \"$count\","
-            done | sed '$s/,$//'
+            netstat -an 2>/dev/null | awk '/^tcp/ {state[$6]++} END {for (s in state) print "  \"" s "\": \"" state[s] "\","}' | sed '$s/,$//'
             echo '}}'
           register: connection_states
 
         - name: Check network statistics
           shell: |
             echo '{"network_stats": {'
-            echo '  "tcp_retransmission_segments": "'$(cat /proc/net/snmp | grep -A1 TcpRetransSegs | tail -1 | cut -d' ' -f2)'",'
-            echo '  "tcp_established_connections": "'$(netstat -an | grep ESTABLISHED | wc -l)'",'
-            echo '  "udp_packets_received": "'$(cat /proc/net/udp | wc -l)'",'
-            echo '  "packet_loss_rate": "'$(ping -c 4 8.8.8.8 2>/dev/null | grep -oP '\d+% packet loss' | head -1 || echo "N/A")'"'
+            echo '  "tcp_retransmission_segments": "'$(cat /proc/net/snmp 2>/dev/null | grep -A1 TcpRetransSegs | tail -1 | awk '{print $2}' 2>/dev/null || echo "N/A")'",'
+            echo '  "tcp_established_connections": "'$(netstat -an 2>/dev/null | grep ESTABLISHED | wc -l || echo "0")'",'
+            echo '  "udp_packets_received": "'$(cat /proc/net/udp 2>/dev/null | wc -l || echo "0")'",'
+            echo '  "packet_loss_rate": "'$(ping -c 2 8.8.8.8 2>/dev/null | grep -o '[0-9]*% packet loss' | head -1 || echo "N/A")'"'
             echo '}}'
           register: network_stats
 
@@ -467,16 +483,18 @@
           shell: |
             echo '{"service_performance": {'
             echo '  "startup_times": {'
-            systemd-analyze | head -10 | while read line; do
+            systemd-analyze 2>/dev/null | head -10 | while read line; do
               if [[ $line == *"Startup finished"* ]]; then
                 echo "    \"total_startup_time\": \"$line\","
               elif [[ $line == *"kernel"* ]] || [[ $line == *"initrd"* ]] || [[ $line == *"userspace"* ]]; then
-                echo "    \"$(echo $line | awk '{print $1}')\": \"$(echo $line | awk '{for(i=2;i<=NF;i++) printf $i" "}')\","
+                component=$(echo "$line" | awk '{print $1}')
+                timing=$(echo "$line" | awk '{for(i=2;i<=NF;i++) printf $i" "}' | sed 's/ *$//')
+                echo "    \"$component\": \"$timing\","
               fi
             done | sed '$s/,$//'
             echo '  },'
             echo '  "slowest_services": {'
-            systemd-analyze blame | head -20 | while read time service; do
+            systemd-analyze blame 2>/dev/null | head -20 | while read time service; do
               if [ "$time" != "" ] && [ "$service" != "" ]; then
                 service_name=$(echo "$service" | sed 's/.service//')
                 echo "    \"$service_name\": \"$time\","
@@ -484,7 +502,8 @@
             done | sed '$s/,$//'
             echo '  },'
             echo '  "boot_analysis": {'
-            echo '    "critical_path_time": \"$(systemd-analyze critical-chain | head -1 | awk '{print $5" "$6" "$7}')\""
+            critical_time=$(systemd-analyze critical-chain 2>/dev/null | head -1 | awk '{print $5" "$6" "$7}' 2>/dev/null || echo "unknown")
+            echo "    \"critical_path_time\": \"$critical_time\""
             echo '  }'
             echo '}}'
           register: service_performance
@@ -554,77 +573,7 @@
               'security_compliance': security_compliance.stdout | from_json
             }) }}"
 
-    - name: Generate Intelligent Risk Assessment
-      set_fact:
-        diagnosis_data: "{{ diagnosis_data | combine({
-          'risk_assessment': {
-            'overall_risk_level': 'low',
-            'security_risks': [
-              'SELinux is disabled' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
-              'No firewall detected' if (diagnosis_data.security_compliance.firewall_status.firewalld == 'not_installed' and diagnosis_data.security_compliance.firewall_status.iptables == 'not_installed' and diagnosis_data.security_compliance.firewall_status.ufw == 'not_installed') else '',
-              'SSH root login enabled' if diagnosis_data.security_compliance.ssh_config_check.permit_root_login == 'yes' else ''
-            ] | select('string') | list,
-            'performance_risks': [
-              'High CPU usage detected' if diagnosis_data.performance_deep_dive.cpu_analysis.cpu_analysis.load_average_1min | float > warning_thresholds.load_1min else '',
-              'High memory pressure' if diagnosis_data.memory_deep_analysis.memory_deep_analysis.swap_info.swap_usage_percent | float > 50 else '',
-              'System limits may be too low' if diagnosis_data.deep_analysis.system_limits.system_limits.max_open_files | int < 65536 else '',
-              'Service resource usage high' if diagnosis_data.service_analysis.service_resources.service_resources.resource_usage | dict2items | map(attribute='value') | selectattr('cpu_percent', 'float') | select('>=', 10) | list | length > 0 else '',
-              'Slow startup services detected' if diagnosis_data.service_analysis.service_performance.service_performance.slowest_services | dict2items | map(attribute='value') | map('split', ' ') | map('first') | map('float') | select('>=', 5) | list | length > 0 else ''
-            ] | select('string') | list,
-            'stability_risks': [
-              'Zombie processes detected' if diagnosis_data.application_analysis.problem_processes.problem_processes.zombie_count | int > 0 else '',
-              'Filesystem errors present' if diagnosis_data.filesystem_analysis.filesystem_errors.filesystem_errors | length > 0 else '',
-              'Network interface errors detected' if diagnosis_data.network_analysis.interface_errors.interface_errors | length > 0 else '',
-              'Failed services detected' if diagnosis_data.service_analysis.service_health.service_health.service_summary.failed_services | int > 0 else '',
-              'Critical service errors in logs' if diagnosis_data.service_analysis.service_resources.service_resources.service_logs_analysis.recent_errors | dict2items | map(attribute='value') | select('>=', 5) | list | length > 0 else '',
-              'Service dependency issues' if diagnosis_data.service_analysis.service_dependencies.service_dependencies.critical_dependencies.network_target != 'active' else ''
-            ] | select('string') | list
-          }
-        }) }}"
-
-    - name: Generate Detailed Recommendations
-      set_fact:
-        diagnosis_data: "{{ diagnosis_data | combine({
-          'recommendations': {
-            'immediate_actions': [
-              'Enable SELinux for enhanced security' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
-              'Configure and enable firewall' if (diagnosis_data.security_compliance.firewall_status.firewalld == 'not_installed' and diagnosis_data.security_compliance.firewall_status.iptables == 'not_installed' and diagnosis_data.security_compliance.firewall_status.ufw == 'not_installed') else '',
-              'Disable SSH root login' if diagnosis_data.security_compliance.ssh_config_check.permit_root_login == 'yes' else '',
-              'Restart failed services' if diagnosis_data.service_analysis.service_health.service_health.service_summary.failed_services | int > 0 else '',
-              'Investigate service errors in logs' if diagnosis_data.service_analysis.service_resources.service_resources.service_logs_analysis.recent_errors | dict2items | map(attribute='value') | select('>=', 5) | list | length > 0 else ''
-            ] | select('string') | list,
-            'performance_optimizations': [
-              'Increase system open files limit' if diagnosis_data.deep_analysis.system_limits.system_limits.max_open_files | int < 65536 else '',
-              'Optimize kernel swappiness' if diagnosis_data.deep_analysis.kernel_parameters.kernel_parameters.swappiness | int > 60 else '',
-              'Monitor swap usage - consider adding more memory' if diagnosis_data.memory_deep_analysis.memory_deep_analysis.swap_info.swap_usage_percent | float > 50 else '',
-              'Optimize slow startup services' if diagnosis_data.service_analysis.service_performance.service_performance.slowest_services | dict2items | map(attribute='value') | map('split', ' ') | map('first') | map('float') | select('>=', 5) | list | length > 0 else '',
-              'Monitor high-resource services' if diagnosis_data.service_analysis.service_resources.service_resources.resource_usage | dict2items | map(attribute='value') | selectattr('cpu_percent', 'float') | select('>=', 10) | list | length > 0 else ''
-            ] | select('string') | list,
-            'security_hardening': [
-              'Regular system updates recommended' if diagnosis_data.security_compliance.system_updates.last_update_check == 'unknown' else '',
-              'Implement intrusion detection system' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
-              'Harden SSH configuration' if diagnosis_data.security_compliance.ssh_config_check.password_auth == 'yes' else '',
-              'Review service permissions and access controls' if diagnosis_data.service_analysis.service_health.service_health.service_summary.enabled_services | int > 20 else '',
-              'Implement service monitoring and alerting' if diagnosis_data.service_analysis.service_health.service_health.service_summary.active_services | int > 30 else ''
-            ] | select('string') | list,
-            'service_management': [
-              'Review and optimize service startup sequence',
-              'Implement service health monitoring',
-              'Set up service dependency management',
-              'Regular service log analysis and cleanup',
-              'Create service backup and recovery procedures'
-            ],
-            'preventive_measures': [
-              'Monitor filesystem usage and growth',
-              'Regular log rotation and cleanup',
-              'Implement system backup strategy',
-              'Monitor network traffic patterns',
-              'Service health check automation',
-              'Performance baseline establishment'
-            ]
-          }
-        }) }}"
-
+  
     - name: Print Comprehensive JSON Output
       debug:
         msg: "{{ diagnosis_data | to_json }}"
