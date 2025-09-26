@@ -1,0 +1,383 @@
+---
+- name: Comprehensive Linux Host Deep Diagnosis and Analysis
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    diagnosis_output_file: "/tmp/linux_comprehensive_diagnosis.json"
+    analysis_depth: 7
+    warning_thresholds:
+      cpu_usage: 80
+      memory_usage: 85
+      disk_usage: 90
+      load_1min: 5.0
+      load_5min: 3.0
+      load_15min: 2.0
+    critical_files:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/etc/sudoers"
+      - "/etc/ssh/sshd_config"
+      - "/etc/hosts.allow"
+      - "/etc/hosts.deny"
+    log_files:
+      - "/var/log/syslog"
+      - "/var/log/messages"
+      - "/var/log/auth.log"
+      - "/var/log/kern.log"
+      - "/var/log/dmesg"
+      - "/var/log/faillog"
+      - "/var/log/secure"
+
+  tasks:
+    - name: Initialize comprehensive diagnosis data structure
+      set_fact:
+        diagnosis_data:
+          metadata:
+            timestamp: "{{ ansible_date_time.iso8601 }}"
+            hostname: "{{ ansible_facts.hostname }}"
+            fqdn: "{{ ansible_facts.fqdn }}"
+            ansible_managed: true
+            analysis_version: "2.0"
+          system_profile:
+            os_info:
+              distribution: "{{ ansible_facts.distribution }}"
+              version: "{{ ansible_facts.distribution_version }}"
+              architecture: "{{ ansible_facts.architecture }}"
+              kernel: "{{ ansible_facts.kernel }}"
+              kernel_version: "{{ ansible_facts.kernel_version }}"
+            hardware:
+              cpu_cores: "{{ ansible_facts.processor_cores }}"
+              cpu_count: "{{ ansible_facts.processor_count }}"
+              memory_total_mb: "{{ ansible_facts.memtotal_mb }}"
+              memory_total_gb: "{{ (ansible_facts.memtotal_mb / 1024) | round(2) }}"
+              swap_total_mb: "{{ ansible_facts.swaptotal_mb }}"
+              virtualization_type: "{{ ansible_facts.virtualization_type }}"
+              product_name: "{{ ansible_facts.product_name }}"
+              serial_number: "{{ ansible_facts.serial_number }}"
+          deep_analysis: {}
+          security_audit: {}
+          performance_deep_dive: {}
+          network_analysis: {}
+          filesystem_analysis: {}
+          application_analysis: {}
+          recommendations: {}
+          risk_assessment: {}
+
+    - name: Deep System Analysis
+      block:
+        - name: Analyze kernel parameters
+          shell: |
+            echo '{"kernel_parameters": {'
+            echo '  "oom_score_adj_min": "'$(sysctl vm.oom_score_adj_min | cut -d' ' -f3)'",'
+            echo '  "swappiness": "'$(sysctl vm.swappiness | cut -d' ' -f3)'",'
+            echo '  "vfs_cache_pressure": "'$(sysctl vm.vfs_cache_pressure | cut -d' ' -f3)'",'
+            echo '  "dirty_ratio": "'$(sysctl vm.dirty_ratio | cut -d' ' -f3)'",'
+            echo '  "dirty_background_ratio": "'$(sysctl vm.dirty_background_ratio | cut -d' ' -f3)'",'
+            echo '  "overcommit_memory": "'$(sysctl vm.overcommit_memory | cut -d' ' -f3)'"'
+            echo '}}'
+          register: kernel_params
+
+        - name: Analyze loaded kernel modules
+          shell: |
+            echo '{"loaded_modules": {'
+            lsmod | tail -n +2 | head -20 | while read module size used_by dependencies; do
+              echo "  \"$module\": {\"size\": \"$size\", \"used_by\": \"$used_by\", \"dependencies\": \"$dependencies\"},"
+            done | sed '$s/,$//'
+            echo '}}'
+          register: kernel_modules
+
+        - name: Check system limits
+          shell: |
+            echo '{"system_limits": {'
+            echo '  "max_processes": "'$(ulimit -u)'",'
+            echo '  "max_open_files": "'$(ulimit -n)'",'
+            echo '  "max_memory_size": "'$(ulimit -v)'",'
+            echo '  "core_file_size": "'$(ulimit -c)'"'
+            echo '}}'
+          register: system_limits
+
+        - name: Add deep system analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'deep_analysis': {
+                'kernel_parameters': kernel_params.stdout | from_json,
+                'kernel_modules': kernel_modules.stdout | from_json,
+                'system_limits': system_limits.stdout | from_json
+              }
+            }) }}"
+
+    - name: Filesystem Deep Analysis
+      block:
+        - name: Analyze filesystem health
+          shell: |
+            echo '{"filesystem_health": {'
+            for fs in $(df -h | awk 'NR>1 {print $6}' | head -10); do
+              if [ -d "$fs" ]; then
+                echo "  \"$fs\": {"
+                echo "    \"total\": \"$(df -h $fs | awk 'NR==2 {print $2}')\","
+                echo "    \"used\": \"$(df -h $fs | awk 'NR==2 {print $3}')\","
+                echo "    \"available\": \"$(df -h $fs | awk 'NR==2 {print $4}')\","
+                echo "    \"usage_percent\": \"$(df -h $fs | awk 'NR==2 {print $5}')\","
+                echo "    \"inode_usage\": \"$(df -i $fs | awk 'NR==2 {print $5}')\","
+                echo "    \"filesystem_type\": \"$(df -T $fs | awk 'NR==2 {print $2}')\","
+                echo "    \"mount_options\": \"$(findmnt -n -o OPTIONS $fs)\""
+                echo "  },"
+              fi
+            done | sed '$s/,$//'
+            echo '}}'
+          register: filesystem_health
+
+        - name: Check for filesystem errors
+          shell: |
+            echo '{"filesystem_errors": {'
+            dmesg | grep -i "ext.*error\|filesystem.*error\|i.*o.*error" | tail -10 | while read line; do
+              echo "  \"error_$(date +%s)\": \"$line\","
+            done | sed '$s/,$//'
+            echo '}}'
+          register: filesystem_errors
+          ignore_errors: yes
+
+        - name: Analyze disk I/O performance
+          shell: |
+            echo '{"disk_io_stats": {'
+            iostat -x -d 1 3 2>/dev/null | tail -n +4 | head -20 | while read device tps kb_read kb_wrtn kb_read_s kb_wrtn_s await svctm util; do
+              if [ "$device" != "" ]; then
+                echo "  \"$device\": {"
+                echo "    \"tps\": \"$tps\","
+                echo "    \"kb_read\": \"$kb_read\","
+                echo "    \"kb_wrtn\": \"$kb_wrtn\","
+                echo "    \"await\": \"$await\","
+                echo "    \"util_percent\": \"$util\""
+                echo "  },"
+              fi
+            done | sed '$s/,$//'
+            echo '}}'
+          register: disk_io_stats
+          ignore_errors: yes
+
+        - name: Add filesystem analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'filesystem_analysis': {
+                'filesystem_health': filesystem_health.stdout | from_json,
+                'filesystem_errors': filesystem_errors.stdout | from_json if not filesystem_errors.failed else {},
+                'disk_io_stats': disk_io_stats.stdout | from_json if not disk_io_stats.failed else {}
+              }
+            }) }}"
+
+    - name: Network Deep Dive Analysis
+      block:
+        - name: Analyze network interface errors
+          shell: |
+            echo '{"interface_errors": {'
+            ip -s link show | grep -E '^[0-9]+|errors|dropped|overruns|frame' | paste - - - - | while read num iface; read rx_bytes rx_packets rx_errors rx_dropped rx_overrun rx_mcast; read tx_bytes tx_packets tx_errors tx_dropped tx_overrun tx_mcast; do
+              iface=$(echo $iface | sed 's/://')
+              echo "  \"$iface\": {"
+              echo "    \"rx_errors\": \"$rx_errors\","
+              echo "    \"rx_dropped\": \"$rx_dropped\","
+              echo "    \"rx_overruns\": \"$rx_overrun\","
+              echo "    \"tx_errors\": \"$tx_errors\","
+              echo "    \"tx_dropped\": \"$tx_dropped\","
+              echo "    \"tx_overruns\": \"$tx_overrun\""
+              echo "  },"
+            done | sed '$s/,$//'
+            echo '}}'
+          register: interface_errors
+
+        - name: Analyze network connection states
+          shell: |
+            echo '{"connection_states": {'
+            netstat -an | awk '/^tcp/ {print $6}' | sort | uniq -c | while read count state; do
+              echo "  \"$state\": \"$count\","
+            done | sed '$s/,$//'
+            echo '}}'
+          register: connection_states
+
+        - name: Check network statistics
+          shell: |
+            echo '{"network_stats": {'
+            echo '  "tcp_retransmission_segments": "'$(cat /proc/net/snmp | grep -A1 TcpRetransSegs | tail -1 | cut -d' ' -f2)'",'
+            echo '  "tcp_established_connections": "'$(netstat -an | grep ESTABLISHED | wc -l)'",'
+            echo '  "udp_packets_received": "'$(cat /proc/net/udp | wc -l)'",'
+            echo '  "packet_loss_rate": "'$(ping -c 4 8.8.8.8 2>/dev/null | grep -oP '\d+% packet loss' | head -1 || echo "N/A")'"'
+            echo '}}'
+          register: network_stats
+
+        - name: Add network analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'network_analysis': {
+                'interface_errors': interface_errors.stdout | from_json,
+                'connection_states': connection_states.stdout | from_json,
+                'network_stats': network_stats.stdout | from_json
+              }
+            }) }}"
+
+    - name: Security Hardening Analysis
+      block:
+        - name: Check SELinux status
+          shell: |
+            echo '{"selinux_status": {'
+            echo '  "enforcing": "'$(getenforce 2>/dev/null || echo "Not installed")'",'
+            echo '  "mode": "'$(sestatus 2>/dev/null | grep "Current mode" | cut -d':' -f2 | xargs 2>/dev/null || echo "N/A")'",'
+            echo '  "policy": "'$(sestatus 2>/dev/null | grep "Loaded policy" | cut -d':' -f2 | xargs 2>/dev/null || echo "N/A")'"'
+            echo '}}'
+          register: selinux_status
+
+        - name: Check AppArmor status
+          shell: |
+            echo '{"apparmor_status": {'
+            echo '  "enabled": "'$(systemctl is-active apparmor 2>/dev/null || echo "Not installed")'",'
+            echo '  "profiles_loaded": "'$(aa-status 2>/dev/null | grep "profiles are loaded" | cut -d' ' -f1 2>/dev/null || echo "0")'"'
+            echo '}}'
+          register: apparmor_status
+
+        - name: Analyze user password policies
+          shell: |
+            echo '{"password_policies": {'
+            echo '  "max_password_age": "'$(grep PASS_MAX_DAYS /etc/login.defs | awk '{print $2}')'",'
+            echo '  "min_password_length": "'$(grep PASS_MIN_LEN /etc/login.defs | awk '{print $2}')'",'
+            echo '  "password_warn_age": "'$(grep PASS_WARN_AGE /etc/login.defs | awk '{print $2}')'",'
+            echo '  "users_without_password": "'$(sudo awk -F: '($2 == "" || $2 == "!") {print $1}' /etc/shadow | wc -l)'"'
+            echo '}}'
+          register: password_policies
+
+        - name: Check critical file permissions
+          shell: |
+            echo '{"file_permissions": {'
+            for file in {{ critical_files | join(' ') }}; do
+              if [ -f "$file" ]; then
+                echo "  \"$file\": {"
+                echo "    \"permissions\": \"$(ls -ld $file | awk '{print $1}')\","
+                echo "    \"owner\": \"$(ls -ld $file | awk '{print $3}')\","
+                echo "    \"group\": \"$(ls -ld $file | awk '{print $4}')\","
+                echo "    \"size\": \"$(ls -lh $file | awk '{print $5}')\""
+                echo "  },"
+              fi
+            done | sed '$s/,$//'
+            echo '}}'
+          register: file_permissions
+
+        - name: Add security analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'security_audit': {
+                'selinux_status': selinux_status.stdout | from_json,
+                'apparmor_status': apparmor_status.stdout | from_json,
+                'password_policies': password_policies.stdout | from_json,
+                'file_permissions': file_permissions.stdout | from_json
+              }
+            }) }}"
+
+    - name: Application and Process Analysis
+      block:
+        - name: Analyze top resource consuming processes
+          shell: |
+            echo '{"top_processes": {'
+            echo '  "cpu_consumers": ['
+            ps aux --sort=-%cpu | head -11 | tail -10 | awk '{printf "{\"pid\":\"%s\",\"user\":\"%s\",\"cpu\":\"%s\",\"memory\":\"%s\",\"command\":\"%s\"},", $2, $1, $3, $4, $11}' | sed '$s/,$//'
+            echo '  ],'
+            echo '  "memory_consumers": ['
+            ps aux --sort=-%mem | head -11 | tail -10 | awk '{printf "{\"pid\":\"%s\",\"user\":\"%s\",\"cpu\":\"%s\",\"memory\":\"%s\",\"command\":\"%s\"},", $2, $1, $3, $4, $11}' | sed '$s/,$//'
+            echo '  ]'
+            echo '}}'
+          register: top_processes
+
+        - name: Check for zombie and orphaned processes
+          shell: |
+            echo '{"problem_processes": {'
+            echo '  "zombie_count": "'$(ps aux | grep defunct | grep -v grep | wc -l)'",'
+            echo '  "orphaned_count": "'$(ps -ef | awk '$3 == 1 && $2 != 1 {print}' | wc -l)'",'
+            echo '  "defunct_pids": ['$(ps aux | grep defunct | grep -v grep | awk '{printf "\"%s\",", $2}' | sed 's/,$//')']'
+            echo '}}'
+          register: problem_processes
+
+        - name: Analyze service dependencies
+          shell: |
+            echo '{"service_dependencies": {'
+            systemctl list-unit-files --type=service --state=enabled | head -20 | while read unit state; do
+              if [ "$state" = "enabled" ]; then
+                service_name=$(echo $unit | sed 's/.service//')
+                echo "  \"$service_name\": {"
+                echo "    \"status\": \"$(systemctl is-active $service_name 2>/dev/null || echo 'unknown')\","
+                echo "    \"dependencies\": \"$(systemctl show $service_name -p Wants | cut -d'=' -f2 | tr ' ' ',')\""
+                echo "  },"
+              fi
+            done | sed '$s/,$//'
+            echo '}}'
+          register: service_dependencies
+
+        - name: Add application analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'application_analysis': {
+                'top_processes': top_processes.stdout | from_json,
+                'problem_processes': problem_processes.stdout | from_json,
+                'service_dependencies': service_dependencies.stdout | from_json
+              }
+            }) }}"
+
+    - name: Performance Deep Dive
+      block:
+        - name: Analyze memory pressure and swapping
+          shell: |
+            echo '{"memory_pressure": {'
+            echo '  "swap_used_percent": "'$(free | grep Swap | awk '{printf "%.1f", $3/$2*100}')'",'
+            echo '  "dirty_pages": "'$(grep Dirty /proc/meminfo | awk '{print $2}')'",'
+            echo '  "slab_usage": "'$(grep SReclaimable /proc/meminfo | awk '{print $2}')'",'
+            echo '  "page_tables": "'$(grep PageTables /proc/meminfo | awk '{print $2}')'"'
+            echo '}}'
+          register: memory_pressure
+
+        - name: Check CPU scheduling and load
+          shell: |
+            echo '{"cpu_analysis": {'
+            echo '  "load_average_1min": "'$(uptime | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs)'",'
+            echo '  "load_average_5min": "'$(uptime | awk -F'load average:' '{print $2}' | cut -d',' -f2 | xargs)'",'
+            echo '  "load_average_15min": "'$(uptime | awk -F'load average:' '{print $2}' | cut -d',' -f3 | xargs)'",'
+            echo '  "context_switches": "'$(grep ctxt /proc/stat | awk '{print $2}')'",'
+            echo '  "interrupts": "'$(grep intr /proc/stat | awk '{print $2}')'"'
+            echo '}}'
+          register: cpu_analysis
+
+        - name: Add performance analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'performance_deep_dive': {
+                'memory_pressure': memory_pressure.stdout | from_json,
+                'cpu_analysis': cpu_analysis.stdout | from_json
+              }
+            }) }}"
+
+    - name: Generate Risk Assessment
+      set_fact:
+        diagnosis_data: "{{ diagnosis_data | combine({
+          'risk_assessment': {
+            'overall_risk_level': 'low',
+            'security_risks': [],
+            'performance_risks': [],
+            'stability_risks': []
+          }
+        }) }}"
+
+    - name: Generate Detailed Recommendations
+      set_fact:
+        diagnosis_data: "{{ diagnosis_data | combine({
+          'recommendations': {
+            'immediate_actions': [],
+            'performance_optimizations': [],
+            'security_hardening': [],
+            'preventive_measures': []
+          }
+        }) }}"
+
+    - name: Print Comprehensive JSON Output
+      debug:
+        msg: "{{ diagnosis_data | to_json }}"
+
+    - name: Save comprehensive JSON output to file
+      copy:
+        content: "{{ diagnosis_data | to_nice_json }}"
+        dest: "{{ diagnosis_output_file }}"
+        mode: '0644'
