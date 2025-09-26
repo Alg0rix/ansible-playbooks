@@ -54,7 +54,7 @@
               swap_total_mb: "{{ ansible_facts.swaptotal_mb }}"
               virtualization_type: "{{ ansible_facts.virtualization_type }}"
               product_name: "{{ ansible_facts.product_name }}"
-              serial_number: "{{ ansible_facts.serial_number }}"
+              serial_number: "{{ ansible_facts.serial_number | default('N/A') }}"
           deep_analysis: {}
           security_audit: {}
           performance_deep_dive: {}
