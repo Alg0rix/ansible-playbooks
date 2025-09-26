@@ -141,17 +141,30 @@
         - name: Analyze disk I/O performance
           shell: |
             echo '{"disk_io_stats": {'
-            iostat -x -d 1 3 2>/dev/null | tail -n +4 | head -20 | while read device tps kb_read kb_wrtn kb_read_s kb_wrtn_s await svctm util; do
-              if [ "$device" != "" ]; then
-                echo "  \"$device\": {"
-                echo "    \"tps\": \"$tps\","
-                echo "    \"kb_read\": \"$kb_read\","
-                echo "    \"kb_wrtn\": \"$kb_wrtn\","
-                echo "    \"await\": \"$await\","
-                echo "    \"util_percent\": \"$util\""
-                echo "  },"
-              fi
-            done | sed '$s/,$//'
+            # Try iostat first, fallback to /proc/diskstats
+            if command -v iostat >/dev/null 2>&1; then
+              iostat -d -x 1 2 2>/dev/null | tail -n +4 | head -20 | while read device tps kb_read kb_wrtn kb_read_s kb_wrtn_s await svctm util; do
+                if [ "$device" != "" ] && [ "$device" != "Device" ]; then
+                  echo "  \"$device\": {"
+                  echo "    \"tps\": \"$tps\","
+                  echo "    \"kb_read_s\": \"$kb_read_s\","
+                  echo "    \"kb_wrtn_s\": \"$kb_wrtn_s\","
+                  echo "    \"await\": \"$await\","
+                  echo "    \"util_percent\": \"$util\""
+                  echo "  },"
+                fi
+              done | sed '$s/,$//'
+            else
+              # Fallback to /proc/diskstats
+              awk '{print $3}' /proc/diskstats | sort | uniq | head -10 | while read device; do
+                if [ -b "/dev/$device" ]; then
+                  echo "  \"$device\": {"
+                  echo "    \"status\": \"available\","
+                  echo "    \"iostat_not_available\": \"true\""
+                  echo "  },"
+                fi
+              done | sed '$s/,$//'
+            fi
             echo '}}'
           register: disk_io_stats
           ignore_errors: yes
@@ -168,19 +181,29 @@
 
     - name: Network Deep Dive Analysis
       block:
-        - name: Analyze network interface errors
+        - name: Analyze network interface errors and statistics
           shell: |
             echo '{"interface_errors": {'
-            ip -s link show | grep -E '^[0-9]+|errors|dropped|overruns|frame' | paste - - - - | while read num iface; read rx_bytes rx_packets rx_errors rx_dropped rx_overrun rx_mcast; read tx_bytes tx_packets tx_errors tx_dropped tx_overrun tx_mcast; do
-              iface=$(echo $iface | sed 's/://')
-              echo "  \"$iface\": {"
-              echo "    \"rx_errors\": \"$rx_errors\","
-              echo "    \"rx_dropped\": \"$rx_dropped\","
-              echo "    \"rx_overruns\": \"$rx_overrun\","
-              echo "    \"tx_errors\": \"$tx_errors\","
-              echo "    \"tx_dropped\": \"$tx_dropped\","
-              echo "    \"tx_overruns\": \"$tx_overrun\""
-              echo "  },"
+            # Get interface statistics
+            ip -s link show | while IFS= read -r line; do
+              if [[ $line =~ ^[0-9]+:[[:space:]]+([^:]+): ]]; then
+                iface="${BASH_REMATCH[1]}"
+                echo "  \"$iface\": {"
+              elif [[ $line =~ [[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]]; then
+                echo "    \"rx_bytes\": \"${BASH_REMATCH[1]}\","
+                echo "    \"rx_packets\": \"${BASH_REMATCH[2]}\","
+                echo "    \"rx_errors\": \"${BASH_REMATCH[3]}\","
+                echo "    \"rx_dropped\": \"${BASH_REMATCH[4]}\","
+                echo "    \"rx_overruns\": \"${BASH_REMATCH[5]}\""
+              elif [[ $line =~ [[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) ]] && [[ -n "$iface" ]]; then
+                echo "    \"tx_bytes\": \"${BASH_REMATCH[1]}\","
+                echo "    \"tx_packets\": \"${BASH_REMATCH[2]}\","
+                echo "    \"tx_errors\": \"${BASH_REMATCH[3]}\","
+                echo "    \"tx_dropped\": \"${BASH_REMATCH[4]}\","
+                echo "    \"tx_overruns\": \"${BASH_REMATCH[5]}\""
+                echo "  },"
+                iface=""
+              fi
             done | sed '$s/,$//'
             echo '}}'
           register: interface_errors
@@ -350,14 +373,212 @@
               }
             }) }}"
 
-    - name: Generate Risk Assessment
+    - name: Service Deep Analysis
+      block:
+        - name: Analyze all services status and health
+          shell: |
+            echo '{"service_health": {'
+            echo '  "all_services": {'
+            systemctl list-units --type=service --all --no-pager --no-legend | while read unit load active sub description; do
+              if [ "$unit" != "" ] && [[ "$unit" == *.service ]]; then
+                service_name=$(echo "$unit" | sed 's/.service//')
+                echo "    \"$service_name\": {"
+                echo "      \"load\": \"$load\","
+                echo "      \"active\": \"$active\","
+                echo "      \"sub\": \"$sub\","
+                echo "      \"description\": \"$description\""
+                echo "    },"
+              fi
+            done | sed '$s/,$//'
+            echo '  },'
+            echo '  "service_summary": {'
+            echo '    "total_services": "'$(systemctl list-units --type=service --all --no-pager --no-legend | wc -l)'",'
+            echo '    "active_services": "'$(systemctl list-units --type=service --state=active --no-pager --no-legend | wc -l)'",'
+            echo '    "failed_services": "'$(systemctl list-units --type=service --state=failed --no-pager --no-legend | wc -l)'",'
+            echo '    "enabled_services": "'$(systemctl list-unit-files --type=service --state=enabled --no-pager --no-legend | wc -l)'",'
+            echo '    "masked_services": "'$(systemctl list-unit-files --type=service --state=masked --no-pager --no-legend | wc -l)'"'
+            echo '  }'
+            echo '}}'
+          register: service_health
+
+        - name: Analyze service dependencies and relationships
+          shell: |
+            echo '{"service_dependencies": {'
+            echo '  "dependency_tree": {'
+            systemctl list-unit-files --type=service --state=enabled | head -30 | while read unit state; do
+              if [ "$state" = "enabled" ]; then
+                service_name=$(echo "$unit" | sed 's/.service//')
+                echo "    \"$service_name\": {"
+                echo "      \"wants\": [$(systemctl show "$service_name" -p Wants | cut -d'=' -f2 | tr ' ' '\n' | grep -v '^$' | head -10 | while read dep; do echo "\"$dep\","; done | sed '$s/,$//')],"
+                echo "      "requires": [$(systemctl show "$service_name" -p Requires | cut -d'=' -f2 | tr ' ' '\n' | grep -v '^$' | head -10 | while read dep; do echo "\"$dep\","; done | sed '$s/,$//')],"
+                echo "      "after": [$(systemctl show "$service_name" -p After | cut -d'=' -f2 | tr ' ' '\n' | grep -v '^$' | head -10 | while read dep; do echo "\"$dep\","; done | sed '$s/,$//')],"
+                echo "      "before": [$(systemctl show "$service_name" -p Before | cut -d'=' -f2 | tr ' ' '\n' | grep -v '^$' | head -10 | while read dep; do echo "\"$dep\","; done | sed '$s/,$//')]"
+                echo "    },"
+              fi
+            done | sed '$s/,$//'
+            echo '  },'
+            echo '  "critical_dependencies": {'
+            echo '    "network_target": "'$(systemctl is-active network.target 2>/dev/null || echo "unknown")'",'
+            echo '    "basic_target": "'$(systemctl is-active basic.target 2>/dev/null || echo "unknown")'",'
+            echo '    "multi_user_target": "'$(systemctl is-active multi-user.target 2>/dev/null || echo "unknown")'",'
+            echo '    "graphical_target": "'$(systemctl is-active graphical.target 2>/dev/null || echo "unknown")'"'
+            echo '  }'
+            echo '}}'
+          register: service_dependencies
+
+        - name: Analyze service resource usage and performance
+          shell: |
+            echo '{"service_resources": {'
+            echo '  "resource_usage": {'
+            # Get top resource-consuming services
+            ps aux --sort=-%cpu | awk '{print $1, $11, $3, $4}' | grep -v "COMMAND\|%\|[" | head -20 | while read user command cpu mem; do
+              service_name=$(echo "$command" | cut -d'/' -f1 | cut -d'-' -f1 | sed 's/^.*://' | sed 's/\[.*\]//')
+              if [ "$service_name" != "" ] && [ "$service_name" != "ps" ] && [ "$service_name" != "awk" ]; then
+                echo "    \"$service_name\": {"
+                echo "      \"cpu_percent\": \"$cpu\","
+                echo "      \"memory_percent\": \"$mem\","
+                echo "      \"user\": \"$user\""
+                echo "    },"
+              fi
+            done | sed '$s/,$//'
+            echo '  },'
+            echo '  "service_logs_analysis": {'
+            echo '    "recent_errors": {'
+            for service in sshd rsyslog cron network systemd-logind; do
+              if systemctl is-active "$service" >/dev/null 2>&1; then
+                errors=$(journalctl -u "$service" -n 100 --no-pager | grep -i "error\|failed\|critical" | wc -l)
+                echo "      \"$service\": \"$errors\","
+              fi
+            done | sed '$s/,$//'
+            echo '    },'
+            echo '    "warning_count": {'
+            for service in sshd rsyslog cron network systemd-logind; do
+              if systemctl is-active "$service" >/dev/null 2>&1; then
+                warnings=$(journalctl -u "$service" -n 100 --no-pager | grep -i "warning\|warn" | wc -l)
+                echo "      \"$service\": \"$warnings\","
+              fi
+            done | sed '$s/,$//'
+            echo '    }'
+            echo '  }'
+            echo '}}'
+          register: service_resources
+
+        - name: Analyze service startup performance and timing
+          shell: |
+            echo '{"service_performance": {'
+            echo '  "startup_times": {'
+            systemd-analyze | head -10 | while read line; do
+              if [[ $line == *"Startup finished"* ]]; then
+                echo "    \"total_startup_time\": \"$line\","
+              elif [[ $line == *"kernel"* ]] || [[ $line == *"initrd"* ]] || [[ $line == *"userspace"* ]]; then
+                echo "    \"$(echo $line | awk '{print $1}')\": \"$(echo $line | awk '{for(i=2;i<=NF;i++) printf $i" "}')\","
+              fi
+            done | sed '$s/,$//'
+            echo '  },'
+            echo '  "slowest_services": {'
+            systemd-analyze blame | head -20 | while read time service; do
+              if [ "$time" != "" ] && [ "$service" != "" ]; then
+                service_name=$(echo "$service" | sed 's/.service//')
+                echo "    \"$service_name\": \"$time\","
+              fi
+            done | sed '$s/,$//'
+            echo '  },'
+            echo '  "boot_analysis": {'
+            echo '    "critical_path_time": \"$(systemd-analyze critical-chain | head -1 | awk '{print $5" "$6" "$7}')\""
+            echo '  }'
+            echo '}}'
+          register: service_performance
+          ignore_errors: yes
+
+        - name: Add service analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'service_analysis': {
+                'service_health': service_health.stdout | from_json,
+                'service_dependencies': service_dependencies.stdout | from_json,
+                'service_resources': service_resources.stdout | from_json,
+                'service_performance': service_performance.stdout | from_json if not service_performance.failed else {}
+              }
+            }) }}"
+
+    - name: Additional Deep Analysis
+      block:
+        - name: Analyze memory fragmentation and swap usage
+          shell: |
+            echo '{"memory_deep_analysis": {'
+            echo '  "swap_info": {'
+            echo '    "swap_total_mb": "'$(free -m | grep Swap | awk '{print $2}')'",'
+            echo '    "swap_used_mb": "'$(free -m | grep Swap | awk '{print $3}')'",'
+            echo '    "swap_free_mb": "'$(free -m | grep Swap | awk '{print $4}')'",'
+            echo '    "swap_usage_percent": "'$(free -m | grep Swap | awk '{if ($2>0) printf "%.1f", $3*100/$2; else print "0"}')'"'
+            echo '  },'
+            echo '  "memory_zones": {'
+            echo '    "dma": "'$(grep -A 3 "DMA" /proc/zoneinfo | head -1 | awk '{print $2}')'",'
+            echo '    "dma32": "'$(grep -A 3 "DMA32" /proc/zoneinfo | head -1 | awk '{print $2}')'",'
+            echo '    "normal": "'$(grep -A 3 "Normal" /proc/zoneinfo | head -1 | awk '{print $2}')'"'
+            echo '  },'
+            echo '  "vm_statistics": {'
+            echo '    "nr_free_pages": "'$(grep nr_free_pages /proc/vmstat | awk '{print $2}')'",'
+            echo '    "nr_inactive_anon": "'$(grep nr_inactive_anon /proc/vmstat | awk '{print $2}')'",'
+            echo '    "nr_active_anon": "'$(grep nr_active_anon /proc/vmstat | awk '{print $2}')'",'
+            echo '    "nr_inactive_file": "'$(grep nr_inactive_file /proc/vmstat | awk '{print $2}')'",'
+            echo '    "nr_active_file": "'$(grep nr_active_file /proc/vmstat | awk '{print $2}')'"'
+            echo '  }'
+            echo '}}'
+          register: memory_deep_analysis
+
+        - name: Analyze security vulnerabilities and compliance
+          shell: |
+            echo '{"security_compliance": {'
+            echo '  "ssh_config_check": {'
+            echo '    "permit_root_login": "'$(grep -i "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2- | tr -d '"' || echo "not_found")'",'
+            echo '    "password_auth": "'$(grep -i "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2- | tr -d '"' || echo "not_found")'",'
+            echo '    "port": "'$(grep -i "^Port" /etc/ssh/sshd_config 2>/dev/null | cut -d' ' -f2 || echo "22")'"'
+            echo '  },'
+            echo '  "system_updates": {'
+            echo '    "last_update_check": "'$(find /var/log -name "yum.log" -o -name "apt.log" -o -name "dnf.log" -mtime -30 2>/dev/null | head -1 | xargs ls -la 2>/dev/null | awk '{print $6" "$7" "$8}' || echo "unknown")'",'
+            echo '    "package_manager": "'$(which yum >/dev/null 2>&1 && echo "yum" || (which dnf >/dev/null 2>&1 && echo "dnf") || (which apt >/dev/null 2>&1 && echo "apt") || echo "unknown")'"'
+            echo '  },'
+            echo '  "firewall_status": {'
+            echo '    "firewalld": "'$(systemctl is-active firewalld 2>/dev/null || echo "not_installed")'",'
+            echo '    "iptables": "'$(systemctl is-active iptables 2>/dev/null || echo "not_installed")'",'
+            echo '    "ufw": "'$(systemctl is-active ufw 2>/dev/null || echo "not_installed")'"'
+            echo '  }'
+            echo '}}'
+          register: security_compliance
+
+        - name: Add additional analysis to diagnosis data
+          set_fact:
+            diagnosis_data: "{{ diagnosis_data | combine({
+              'memory_deep_analysis': memory_deep_analysis.stdout | from_json,
+              'security_compliance': security_compliance.stdout | from_json
+            }) }}"
+
+    - name: Generate Intelligent Risk Assessment
       set_fact:
         diagnosis_data: "{{ diagnosis_data | combine({
           'risk_assessment': {
             'overall_risk_level': 'low',
-            'security_risks': [],
-            'performance_risks': [],
-            'stability_risks': []
+            'security_risks': [
+              'SELinux is disabled' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
+              'No firewall detected' if (diagnosis_data.security_compliance.firewall_status.firewalld == 'not_installed' and diagnosis_data.security_compliance.firewall_status.iptables == 'not_installed' and diagnosis_data.security_compliance.firewall_status.ufw == 'not_installed') else '',
+              'SSH root login enabled' if diagnosis_data.security_compliance.ssh_config_check.permit_root_login == 'yes' else ''
+            ] | select('string') | list,
+            'performance_risks': [
+              'High CPU usage detected' if diagnosis_data.performance_deep_dive.cpu_analysis.cpu_analysis.load_average_1min | float > warning_thresholds.load_1min else '',
+              'High memory pressure' if diagnosis_data.memory_deep_analysis.memory_deep_analysis.swap_info.swap_usage_percent | float > 50 else '',
+              'System limits may be too low' if diagnosis_data.deep_analysis.system_limits.system_limits.max_open_files | int < 65536 else '',
+              'Service resource usage high' if diagnosis_data.service_analysis.service_resources.service_resources.resource_usage | dict2items | map(attribute='value') | selectattr('cpu_percent', 'float') | select('>=', 10) | list | length > 0 else '',
+              'Slow startup services detected' if diagnosis_data.service_analysis.service_performance.service_performance.slowest_services | dict2items | map(attribute='value') | map('split', ' ') | map('first') | map('float') | select('>=', 5) | list | length > 0 else ''
+            ] | select('string') | list,
+            'stability_risks': [
+              'Zombie processes detected' if diagnosis_data.application_analysis.problem_processes.problem_processes.zombie_count | int > 0 else '',
+              'Filesystem errors present' if diagnosis_data.filesystem_analysis.filesystem_errors.filesystem_errors | length > 0 else '',
+              'Network interface errors detected' if diagnosis_data.network_analysis.interface_errors.interface_errors | length > 0 else '',
+              'Failed services detected' if diagnosis_data.service_analysis.service_health.service_health.service_summary.failed_services | int > 0 else '',
+              'Critical service errors in logs' if diagnosis_data.service_analysis.service_resources.service_resources.service_logs_analysis.recent_errors | dict2items | map(attribute='value') | select('>=', 5) | list | length > 0 else '',
+              'Service dependency issues' if diagnosis_data.service_analysis.service_dependencies.service_dependencies.critical_dependencies.network_target != 'active' else ''
+            ] | select('string') | list
           }
         }) }}"
 
@@ -365,10 +586,42 @@
       set_fact:
         diagnosis_data: "{{ diagnosis_data | combine({
           'recommendations': {
-            'immediate_actions': [],
-            'performance_optimizations': [],
-            'security_hardening': [],
-            'preventive_measures': []
+            'immediate_actions': [
+              'Enable SELinux for enhanced security' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
+              'Configure and enable firewall' if (diagnosis_data.security_compliance.firewall_status.firewalld == 'not_installed' and diagnosis_data.security_compliance.firewall_status.iptables == 'not_installed' and diagnosis_data.security_compliance.firewall_status.ufw == 'not_installed') else '',
+              'Disable SSH root login' if diagnosis_data.security_compliance.ssh_config_check.permit_root_login == 'yes' else '',
+              'Restart failed services' if diagnosis_data.service_analysis.service_health.service_health.service_summary.failed_services | int > 0 else '',
+              'Investigate service errors in logs' if diagnosis_data.service_analysis.service_resources.service_resources.service_logs_analysis.recent_errors | dict2items | map(attribute='value') | select('>=', 5) | list | length > 0 else ''
+            ] | select('string') | list,
+            'performance_optimizations': [
+              'Increase system open files limit' if diagnosis_data.deep_analysis.system_limits.system_limits.max_open_files | int < 65536 else '',
+              'Optimize kernel swappiness' if diagnosis_data.deep_analysis.kernel_parameters.kernel_parameters.swappiness | int > 60 else '',
+              'Monitor swap usage - consider adding more memory' if diagnosis_data.memory_deep_analysis.memory_deep_analysis.swap_info.swap_usage_percent | float > 50 else '',
+              'Optimize slow startup services' if diagnosis_data.service_analysis.service_performance.service_performance.slowest_services | dict2items | map(attribute='value') | map('split', ' ') | map('first') | map('float') | select('>=', 5) | list | length > 0 else '',
+              'Monitor high-resource services' if diagnosis_data.service_analysis.service_resources.service_resources.resource_usage | dict2items | map(attribute='value') | selectattr('cpu_percent', 'float') | select('>=', 10) | list | length > 0 else ''
+            ] | select('string') | list,
+            'security_hardening': [
+              'Regular system updates recommended' if diagnosis_data.security_compliance.system_updates.last_update_check == 'unknown' else '',
+              'Implement intrusion detection system' if diagnosis_data.security_audit.selinux_status.selinux_status.enforcing == 'Disabled' else '',
+              'Harden SSH configuration' if diagnosis_data.security_compliance.ssh_config_check.password_auth == 'yes' else '',
+              'Review service permissions and access controls' if diagnosis_data.service_analysis.service_health.service_health.service_summary.enabled_services | int > 20 else '',
+              'Implement service monitoring and alerting' if diagnosis_data.service_analysis.service_health.service_health.service_summary.active_services | int > 30 else ''
+            ] | select('string') | list,
+            'service_management': [
+              'Review and optimize service startup sequence',
+              'Implement service health monitoring',
+              'Set up service dependency management',
+              'Regular service log analysis and cleanup',
+              'Create service backup and recovery procedures'
+            ],
+            'preventive_measures': [
+              'Monitor filesystem usage and growth',
+              'Regular log rotation and cleanup',
+              'Implement system backup strategy',
+              'Monitor network traffic patterns',
+              'Service health check automation',
+              'Performance baseline establishment'
+            ]
           }
         }) }}"
 
