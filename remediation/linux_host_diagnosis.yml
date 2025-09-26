@@ -1,6 +1,6 @@
 ---
 - name: Comprehensive Linux Host Deep Diagnosis and Analysis
-  hosts: all
+  hosts: "{{ target_hosts | default('all') }}"
   become: yes
   gather_facts: yes
   vars:
